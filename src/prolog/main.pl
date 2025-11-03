@@ -18,6 +18,21 @@
 :- abolish(a_breeze_at/2).  % breeze cells
 :- abolish(no_logs/1).      % show/hide logs
 
+% ============================================================================
+% NEW: Enhanced gameplay features
+% ============================================================================
+:- abolish(sound_event/4).      % sound events (X, Y, Loudness, Duration)
+:- abolish(wumpus_state/2).     % wumpus AI state (ID, State)
+:- abolish(wumpus_target/3).    % wumpus target (ID, X, Y)
+:- abolish(wumpus_alert_turns/2). % wumpus alert counter
+:- abolish(h_rocks/1).          % rock count
+:- abolish(rock_pickup/2).      % rock pickup locations
+:- abolish(chest/4).            % treasure chests (ID, X, Y, Type)
+:- abolish(chest_opened/1).     % opened chest IDs
+:- abolish(player_stunned/1).   % player stun turns remaining
+:- abolish(fog_revealed/2).     % fog of war - revealed cells
+:- abolish(fog_visible/2).      % fog of war - currently visible cells
+
 % Create dynamic data to store info later.
 :- dynamic ([
     w_wall/2, 
@@ -33,7 +48,19 @@
     a_visited/2,
     a_stench_at/2,
     a_breeze_at/2,
-    no_logs/1
+    no_logs/1,
+    % NEW: Enhanced features
+    sound_event/4,
+    wumpus_state/2,
+    wumpus_target/3,
+    wumpus_alert_turns/2,
+    h_rocks/1,
+    rock_pickup/2,
+    chest/4,
+    chest_opened/1,
+    player_stunned/1,
+    fog_revealed/2,
+    fog_visible/2
 ]).
 
 clearWorld :-
@@ -54,7 +81,19 @@ clearWorld :-
     retractall(a_visited(_,_)),
     retractall(a_stench_at(_,_)),
     retractall(a_breeze_at(_,_)),
-    retractall(no_logs(_)). 
+    retractall(no_logs(_)),
+    % NEW: Clear enhanced features
+    retractall(sound_event(_,_,_,_)),
+    retractall(wumpus_state(_,_)),
+    retractall(wumpus_target(_,_,_)),
+    retractall(wumpus_alert_turns(_,_)),
+    retractall(h_rocks(_)),
+    retractall(rock_pickup(_,_)),
+    retractall(chest(_,_,_,_)),
+    retractall(chest_opened(_)),
+    retractall(player_stunned(_)),
+    retractall(fog_revealed(_,_)),
+    retractall(fog_visible(_,_)). 
 
 buildWalls :-
     /**
@@ -138,7 +177,14 @@ createWorld :-
     assert(w_hunter(1,1,right)),
     assert(h_arrow(1)),
     assert(w_goal(0)),
-    assert(h_score(0)).
+    assert(h_score(0)),
+    % NEW: Initialize enhanced features
+    init_rocks,
+    generate_rock_pickups,
+    generate_chests,
+    init_wumpus_ai,
+    init_fog,
+    update_fog.
 
 createTWorld :-
     /**
@@ -157,7 +203,14 @@ createTWorld :-
     assert(w_hunter(1,1,right)),
     assert(h_arrow(1)),
     assert(w_goal(0)),
-    assert(h_score(0)).
+    assert(h_score(0)),
+    % NEW: Initialize enhanced features
+    init_rocks,
+    generate_rock_pickups,
+    generate_chests,
+    init_wumpus_ai,
+    init_fog,
+    update_fog.
 
 welcome :-
     /**
@@ -317,10 +370,10 @@ move :-
     h_score(A), B is A-1, retract(h_score(_)), assert(h_score(B)),
     w_hunter(X,Y,FACING),
     (
-        FACING = up, N_Y is Y+1, N_X is X;
-        FACING = down, N_Y is Y-1, N_X is X;
-        FACING = left, N_X is X-1, N_Y is Y;
-        FACING = right, N_X is X+1, N_Y is Y
+        FACING = up, N_Y is Y + 1, N_X is X;
+        FACING = down, N_Y is Y - 1, N_X is X;
+        FACING = left, N_X is X - 1, N_Y is Y;
+        FACING = right, N_X is X + 1, N_Y is Y
     ),
 	retract(w_hunter(_,_,_)),
 	assert(w_hunter(N_X, N_Y, FACING)). 
@@ -944,3 +997,448 @@ run(user) :- clearWorld, assert(no_logs(0)), createWorld, welcome, init, menu, !
 run(map) :- clearWorld, assert(no_logs(0)), createTWorld, runloop(0), !.
 % run the agent from prolog on a random map
 run :- clearWorld, assert(no_logs(0)), createWorld, runloop(0). 
+
+% ============================================================================
+% SOUND SYSTEM - Enhanced Stealth Gameplay
+% ============================================================================
+
+% Sound levels for different actions
+action_sound(idle, 0).
+action_sound(move, 1).       % Quiet walk - 1 cell radius
+action_sound(left, 0).       % Turning is silent
+action_sound(right, 0).
+action_sound(shoot, 2).      % Loud shooting - 2 cells radius
+action_sound(throw_rock, 4). % VERY loud rock impact - 4 cells radius
+
+% Add sound event
+add_sound(X, Y, Loudness, Duration) :-
+    assert(sound_event(X, Y, Loudness, Duration)).
+
+% Decay all sounds by 1 turn
+decay_sounds :-
+    forall(
+        sound_event(X, Y, L, D),
+        (
+            D > 0 ->
+                (
+                    retract(sound_event(X, Y, L, D)),
+                    NewD is D - 1,
+                    (NewD > 0 -> assert(sound_event(X, Y, L, NewD)); true)
+                )
+            ;
+                retract(sound_event(X, Y, L, 0))
+        )
+    ).
+
+% Clear all sounds
+clear_sounds :-
+    retractall(sound_event(_,_,_,_)).
+
+% Check if Wumpus can hear sound
+wumpus_hears_sound(WX, WY, SX, SY, Loudness) :-
+    sound_event(SX, SY, Loudness, Duration),
+    Duration > 0,
+    grid_distance(WX, WY, SX, SY, Dist),
+    Dist =< Loudness.
+
+% ============================================================================
+% WUMPUS AI STATES - Intelligent Enemy Behavior
+% ============================================================================
+
+% Initialize Wumpus AI state
+init_wumpus_ai :-
+    assert(wumpus_state(1, patrol)),
+    assert(wumpus_alert_turns(1, 0)).
+
+% Wumpus detects sound and switches state
+wumpus_detect_sound :-
+    w_wumpus(WX, WY),
+    wumpus_state(1, CurrentState),
+    CurrentState \= chasing,  % Chasing has priority
+    % Find loudest sound in range
+    findall([SX, SY, L], 
+        (sound_event(SX, SY, L, D), D > 0, grid_distance(WX, WY, SX, SY, Dist), Dist =< L), 
+        Sounds),
+    Sounds \= [],
+    % Get loudest sound (MaxL not used but needed for structure)
+    max_member([MaxSX, MaxSY, _MaxL], Sounds),
+    % Switch to investigating
+    retract(wumpus_state(1, _)),
+    assert(wumpus_state(1, investigating)),
+    retractall(wumpus_target(1, _, _)),
+    assert(wumpus_target(1, MaxSX, MaxSY)).
+
+% Wumpus sees player (very close - adjacent cell)
+wumpus_see_player :-
+    w_wumpus(WX, WY),
+    w_hunter(HX, HY, _),
+    grid_distance(WX, WY, HX, HY, Dist),
+    Dist =< 1,  % Adjacent cell
+    % Switch to chasing
+    retract(wumpus_state(1, _)),
+    assert(wumpus_state(1, chasing)).
+
+% Wumpus turn behavior
+wumpus_turn :-
+    wumpus_state(1, State),
+    wumpus_behavior(State).
+
+% PATROL: Random movement in safe areas
+wumpus_behavior(patrol) :-
+    w_wumpus(X, Y),
+    random_adjacent_safe_cell(X, Y, NX, NY),
+    retract(w_wumpus(X, Y)),
+    assert(w_wumpus(NX, NY)).
+
+% INVESTIGATING: Move toward sound source
+wumpus_behavior(investigating) :-
+    w_wumpus(WX, WY),
+    wumpus_target(1, TX, TY),
+    move_toward(WX, WY, TX, TY, NX, NY),
+    retract(w_wumpus(WX, WY)),
+    assert(w_wumpus(NX, NY)),
+    % Check if reached target
+    (
+        (NX = TX, NY = TY) ->
+            (
+                retract(wumpus_state(1, _)),
+                assert(wumpus_state(1, alert)),
+                retract(wumpus_alert_turns(1, _)),
+                assert(wumpus_alert_turns(1, 3))
+            )
+        ;
+            true
+    ).
+
+% ALERT: Search nearby for 3 turns
+wumpus_behavior(alert) :-
+    wumpus_alert_turns(1, Turns),
+    (
+        Turns > 0 ->
+            (
+                w_wumpus(X, Y),
+                random_adjacent_safe_cell(X, Y, NX, NY),
+                retract(w_wumpus(X, Y)),
+                assert(w_wumpus(NX, NY)),
+                retract(wumpus_alert_turns(1, Turns)),
+                NewTurns is Turns - 1,
+                assert(wumpus_alert_turns(1, NewTurns))
+            )
+        ;
+            (
+                retract(wumpus_state(1, _)),
+                assert(wumpus_state(1, patrol))
+            )
+    ).
+
+% CHASING: Fast movement toward player (2 moves per turn!)
+wumpus_behavior(chasing) :-
+    w_wumpus(WX, WY),
+    w_hunter(HX, HY, _),
+    % First move
+    move_toward(WX, WY, HX, HY, MX1, MY1),
+    % Second move (if still far)
+    grid_distance(MX1, MY1, HX, HY, Dist),
+    (
+        Dist > 1 ->
+            move_toward(MX1, MY1, HX, HY, MX2, MY2)
+        ;
+            (MX2 is MX1, MY2 is MY1)
+    ),
+    retract(w_wumpus(WX, WY)),
+    assert(w_wumpus(MX2, MY2)),
+    % Check if still close to player
+    grid_distance(MX2, MY2, HX, HY, NewDist),
+    (
+        NewDist > 2 ->
+            (
+                retract(wumpus_state(1, _)),
+                assert(wumpus_state(1, patrol))
+            )
+        ;
+            true
+    ).
+
+% ============================================================================
+% UTILITY PREDICATES
+% ============================================================================
+
+% Helper: Move one cell toward target
+move_toward(FromX, FromY, ToX, ToY, NewX, NewY) :-
+    DX is ToX - FromX,
+    DY is ToY - FromY,
+    (
+        (abs(DX) > abs(DY), DX > 0) -> (TestX is FromX + 1, TestY is FromY);
+        (abs(DX) > abs(DY), DX < 0) -> (TestX is FromX - 1, TestY is FromY);
+        (DY > 0) -> (TestX is FromX, TestY is FromY + 1);
+        (DY < 0) -> (TestX is FromX, TestY is FromY - 1);
+        (TestX is FromX, TestY is FromY)
+    ),
+    % Validate move (not wall, not pit)
+    (
+        (\+ w_wall(TestX, TestY), \+ w_pit(TestX, TestY)) ->
+            (NewX is TestX, NewY is TestY)
+        ;
+            (NewX is FromX, NewY is FromY)  % Can't move, stay in place
+    ).
+
+% Helper: Random adjacent safe cell
+random_adjacent_safe_cell(X, Y, NX, NY) :-
+    findall([AX, AY], 
+        (
+            adjacent_cell(X, Y, AX, AY),
+            \+ w_wall(AX, AY),
+            \+ w_pit(AX, AY)
+        ), 
+        SafeCells
+    ),
+    (
+        SafeCells \= [] ->
+            random_member([NX, NY], SafeCells)
+        ;
+            (NX is X, NY is Y)  % No safe cells, stay put
+    ).
+
+% Adjacent cells (4 directions)
+adjacent_cell(X, Y, AX, AY) :-
+    member([DX, DY], [[0,1], [0,-1], [1,0], [-1,0]]),
+    AX is X + DX,
+    AY is Y + DY.
+
+% Helper: Grid distance (Manhattan)
+grid_distance(X1, Y1, X2, Y2, Dist) :-
+    DX is abs(X2 - X1),
+    DY is abs(Y2 - Y1),
+    Dist is DX + DY.
+
+% ============================================================================
+% ROCK THROWING SYSTEM
+% ============================================================================
+
+% Initialize rocks
+init_rocks :-
+    assert(h_rocks(2)).  % Start with 2 rocks
+
+% Generate rock pickups (3 pickups on map)
+generate_rock_pickups :-
+    selectCell(X1, Y1),
+    assert(rock_pickup(X1, Y1)),
+    selectCell(X2, Y2),
+    assert(rock_pickup(X2, Y2)),
+    selectCell(X3, Y3),
+    assert(rock_pickup(X3, Y3)).
+
+% Throw rock at target
+throw_rock(TargetX, TargetY) :-
+    h_rocks(Count),
+    Count > 0,
+    w_hunter(HX, HY, _),
+    % Check range (1-4 cells)
+    grid_distance(HX, HY, TargetX, TargetY, Dist),
+    Dist >= 1,
+    Dist =< 4,
+    % Create VERY loud sound at target
+    add_sound(TargetX, TargetY, 4, 3),
+    % Consume rock
+    retract(h_rocks(Count)),
+    NewCount is Count - 1,
+    assert(h_rocks(NewCount)),
+    % Update score
+    h_score(A), B is A - 5, retract(h_score(_)), assert(h_score(B)),
+    (
+        no_logs(NL), NL \= 1 -> 
+            format('\n\nROCK THROWN to (~d,~d)! Created loud noise.~n', [TargetX, TargetY]); 
+        true
+    ).
+
+% Collect rock pickup
+collect_rock :-
+    w_hunter(X, Y, _),
+    rock_pickup(X, Y),
+    h_rocks(Current),
+    Current < 5,  % Max 5 rocks
+    retract(rock_pickup(X, Y)),
+    retract(h_rocks(Current)),
+    NewCount is Current + 1,
+    assert(h_rocks(NewCount)),
+    (
+        no_logs(NL), NL \= 1 -> 
+            write('\n\nCOLLECTED ROCK! '); 
+        true
+    ).
+
+% ============================================================================
+% TREASURE CHEST & MIMIC SYSTEM
+% ============================================================================
+
+% Generate 3 chests: 1 treasure, 2 mimics
+generate_chests :-
+    selectCell(X1, Y1),
+    selectCell(X2, Y2),
+    selectCell(X3, Y3),
+    % Randomize which is treasure
+    random_permutation([treasure, mimic, mimic], Types),
+    nth0(0, Types, T1),
+    nth0(1, Types, T2),
+    nth0(2, Types, T3),
+    assert(chest(1, X1, Y1, T1)),
+    assert(chest(2, X2, Y2, T2)),
+    assert(chest(3, X3, Y3, T3)).
+
+% Mimic movement (when player far away)
+mimic_turn(ChestID) :-
+    chest(ChestID, X, Y, mimic),
+    \+ chest_opened(ChestID),
+    w_hunter(HX, HY, _),
+    grid_distance(X, Y, HX, HY, Dist),
+    Dist > 3,  % Only move if player > 3 cells away
+    % Random move
+    random_adjacent_safe_cell(X, Y, NX, NY),
+    retract(chest(ChestID, X, Y, mimic)),
+    assert(chest(ChestID, NX, NY, mimic)).
+
+% Process all mimic movements
+process_mimic_turns :-
+    forall(
+        (chest(ID, _, _, mimic), \+ chest_opened(ID)),
+        mimic_turn(ID)
+    ).
+
+% Open chest
+open_chest :-
+    w_hunter(X, Y, _),
+    chest(ChestID, X, Y, Type),
+    \+ chest_opened(ChestID),
+    assert(chest_opened(ChestID)),
+    handle_chest_open(ChestID, Type, X, Y).
+
+% Handle treasure chest (ChestID unused but kept for signature)
+handle_chest_open(_ChestID, treasure, X, Y) :-
+    % Found treasure!
+    retract(w_gold(_, _)),
+    assert(w_gold(X, Y)),
+    retract(w_goal(0)),
+    assert(w_goal(1)),
+    h_score(A), B is A + 1000, retract(h_score(_)), assert(h_score(B)),
+    (
+        no_logs(NL), NL \= 1 -> 
+            write('\n\n🎉 TREASURE FOUND! Now escape to (1,1)!\n'); 
+        true
+    ).
+
+% Handle mimic attack! (ChestID unused but kept for signature)
+handle_chest_open(_ChestID, mimic, X, Y) :-
+    % Mimic attack!
+    assert(player_stunned(2)),
+    % Create VERY loud sound
+    add_sound(X, Y, 5, 4),
+    % Wumpus switches to chasing!
+    retract(wumpus_state(1, _)),
+    assert(wumpus_state(1, chasing)),
+    % Damage player score
+    h_score(A), B is A - 500, retract(h_score(_)), assert(h_score(B)),
+    (
+        no_logs(NL), NL \= 1 -> 
+            write('\n\n💀 MIMIC ATTACK! You are stunned for 2 turns! Wumpus is chasing!\n'); 
+        true
+    ).
+
+% Process stun
+process_stun :-
+    (
+        player_stunned(Turns),
+        Turns > 0 ->
+            (
+                retract(player_stunned(Turns)),
+                NewTurns is Turns - 1,
+                (NewTurns > 0 -> assert(player_stunned(NewTurns)); true)
+            )
+        ;
+            retractall(player_stunned(_))
+    ).
+
+% Check if player is stunned
+is_player_stunned :-
+    player_stunned(Turns),
+    Turns > 0.
+
+% ============================================================================
+% FOG OF WAR SYSTEM
+% ============================================================================
+
+% Initialize fog (all cells hidden)
+init_fog :-
+    retractall(fog_revealed(_,_)),
+    retractall(fog_visible(_,_)).
+
+% Update fog based on player position
+update_fog :-
+    retractall(fog_visible(_,_)),
+    w_hunter(HX, HY, _),
+    VisionRange = 2,
+    % Mark visible cells
+    forall(
+        (
+            between(1, 4, X),
+            between(1, 4, Y),
+            grid_distance(HX, HY, X, Y, Dist),
+            Dist =< VisionRange
+        ),
+        (
+            assert(fog_visible(X, Y)),
+            assert(fog_revealed(X, Y))
+        )
+    ).
+
+% Check if cell is visible
+is_visible(X, Y) :-
+    fog_visible(X, Y).
+
+% Check if cell has been revealed
+is_revealed(X, Y) :-
+    fog_revealed(X, Y).
+
+% ============================================================================
+% ENHANCED TURN SYSTEM
+% ============================================================================
+
+% Process player turn (with sound generation)
+process_player_action(Action) :-
+    % Check if stunned
+    (
+        is_player_stunned ->
+            (
+                no_logs(NL), NL \= 1 -> 
+                    write('\n⚠️  STUNNED! Cannot act this turn.\n'); 
+                true
+            )
+        ;
+            (
+                % Execute action
+                action_sound(Action, Loudness),
+                (
+                    Loudness > 0 ->
+                        (
+                            w_hunter(HX, HY, _),
+                            add_sound(HX, HY, Loudness, 1)
+                        )
+                    ;
+                        true
+                )
+            )
+    ).
+
+% Process environment turn
+process_environment_turn :-
+    % Decay sounds
+    decay_sounds,
+    % Process stun
+    process_stun,
+    % Mimic movement
+    process_mimic_turns,
+    % Update fog
+    update_fog,
+    % Wumpus AI
+    wumpus_detect_sound,
+    wumpus_see_player,
+    wumpus_turn. 

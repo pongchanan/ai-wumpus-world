@@ -1,6 +1,7 @@
 import sys
 import pygame
 import argparse
+import math
 
 from pyswip import Prolog
 from utils import rotate
@@ -11,6 +12,10 @@ from date import (
     WUMPUS_IDLE, WUMPUS_BLOOD, GOLD, PIT,
     W_BS, W_BREEZE, W_STENCH, W_GOLD, EXIT
 )
+
+# Import new UI components
+from fog_of_war import FogOfWar
+from ui_components import InventoryDisplay, RockAimingOverlay, TurnIndicator
 
 prolog = Prolog()
 prolog.consult(PROLOG_PATH)
@@ -150,6 +155,102 @@ class Gold(element, pygame.sprite.Sprite):
             WIN.blit(EXIT, (0, 0))
 
 
+class TreasureChest(element, pygame.sprite.Sprite):
+    """Treasure chest that could be real or mimic"""
+    
+    def __init__(self, chest_id, x, y):
+        super().__init__(x, y)
+        self.chest_id = chest_id
+        self.opened = False
+        
+        # Get type from Prolog
+        chest_info = list(prolog.query(f"chest({chest_id}, _, _, Type)."))
+        self.is_mimic = chest_info[0]['Type'] == 'mimic' if chest_info else False
+        
+        # Animation
+        self.shake_timer = 0
+        self.shake_offset = 0
+        
+        # Create chest image
+        self.create_chest_image()
+    
+    def create_chest_image(self):
+        """Draw chest sprite"""
+        size = 40
+        self.image = pygame.Surface((size, size), pygame.SRCALPHA)
+        
+        if self.opened:
+            # Open chest
+            pygame.draw.rect(self.image, (139, 69, 19), (5, 20, 30, 15))
+            if not self.is_mimic:
+                # Show gold
+                pygame.draw.circle(self.image, (255, 215, 0), (20, 27), 8)
+        else:
+            # Closed chest (brown box)
+            pygame.draw.rect(self.image, (139, 69, 19), (5, 15, 30, 20))
+            pygame.draw.rect(self.image, (101, 67, 33), (5, 10, 30, 10))
+            pygame.draw.rect(self.image, (218, 165, 32), (18, 20, 4, 6))
+            
+            # Mimic has slight red tint and shake
+            if self.is_mimic:
+                red_tint = pygame.Surface((size, size), pygame.SRCALPHA)
+                red_tint.fill((255, 0, 0, 30))
+                self.image.blit(red_tint, (0, 0))
+        
+        self.rect = self.image.get_rect(center=(self.x, self.y))
+    
+    def update(self):
+        """Update chest (shake for mimics)"""
+        # Check if opened
+        opened_result = list(prolog.query(f"chest_opened({self.chest_id})."))
+        self.opened = len(opened_result) > 0
+        
+        if not self.opened and self.is_mimic:
+            self.shake_timer += 0.1
+            self.shake_offset = math.sin(self.shake_timer * 10) * 2
+        else:
+            self.shake_offset = 0
+        
+        # Update position from Prolog (mimics can move)
+        chest_info = list(prolog.query(f"chest({self.chest_id}, X, Y, _)."))
+        if chest_info:
+            new_x, new_y = chest_info[0]['X'], chest_info[0]['Y']
+            self.x, self.y = POSITIONS[new_x-1][new_y-1]
+            self.x += self.shake_offset
+        
+        self.create_chest_image()
+    
+    def draw(self):
+        self.rect = self.image.get_rect(center=(self.x, self.y))
+        WIN.blit(self.image, self.rect)
+
+
+class RockPickup(element, pygame.sprite.Sprite):
+    """Rock pickup item"""
+    
+    def __init__(self, x, y):
+        super().__init__(x, y)
+        
+        # Create rock image
+        size = 30
+        self.image = pygame.Surface((size, size), pygame.SRCALPHA)
+        pygame.draw.circle(self.image, (150, 150, 150), (size//2, size//2), size//2 - 2)
+        pygame.draw.circle(self.image, (100, 100, 100), (size//2, size//2), size//2 - 2, 2)
+        
+        self.collected = False
+    
+    def update(self):
+        """Check if collected"""
+        # Check if still exists in Prolog
+        px = (self.x - POSITIONS[0][0][0]) // 147 + 1  # Convert back to grid
+        py = (self.y - POSITIONS[0][0][1]) // 147 + 1
+        
+        result = list(prolog.query(f"rock_pickup({px}, {py})."))
+        if not result:
+            self.collected = True
+            self.x, self.y = (-999, -999)
+
+
 def valid_move(hunter_obj):
     """avoid moving hunter into the wall before prolog do it"""
     facing = hunter_obj.rotation
@@ -256,23 +357,83 @@ def draw_window(light, sprites, *elems):
     pygame.display.update()
 
 
-def user_controller(event, hunter):
+def user_controller(event, hunter, rock_aiming=None, turn_indicator=None):
     """user bindings to control the hunter"""
+    # Check if player is stunned
+    if list(prolog.query("is_player_stunned.")):
+        print("⚠️ You are stunned! Cannot act this turn.")
+        return
+    
+    # Rock throwing mode
+    if rock_aiming and rock_aiming.aiming:
+        if event.key == pygame.K_LEFT:
+            rock_aiming.cycle_target(-1)
+        elif event.key == pygame.K_RIGHT:
+            rock_aiming.cycle_target(1)
+        elif event.key == pygame.K_UP:
+            rock_aiming.cycle_target(-4)  # Move up in grid
+        elif event.key == pygame.K_DOWN:
+            rock_aiming.cycle_target(4)   # Move down in grid
+        elif event.key == pygame.K_SPACE:
+            if rock_aiming.confirm_throw():
+                # Process environment turn after throw
+                list(prolog.query("process_environment_turn."))
+                if turn_indicator:
+                    turn_indicator.increment_turn()
+        elif event.key == pygame.K_ESCAPE:
+            rock_aiming.cancel()
+        return
+    
+    # Normal movement
     if event.key == pygame.K_UP and valid_move(hunter):
         list(prolog.query("move."))
+        list(prolog.query("process_environment_turn."))
+        if turn_indicator:
+            turn_indicator.increment_turn()
     if event.key == pygame.K_LEFT:
         list(prolog.query("left."))
+        list(prolog.query("process_environment_turn."))
+        if turn_indicator:
+            turn_indicator.increment_turn()
     if event.key == pygame.K_RIGHT:
         list(prolog.query("right."))
+        list(prolog.query("process_environment_turn."))
+        if turn_indicator:
+            turn_indicator.increment_turn()
     if event.key == pygame.K_s:
         list(prolog.query("shoot."))
+        list(prolog.query("process_environment_turn."))
+        if turn_indicator:
+            turn_indicator.increment_turn()
     if event.key == pygame.K_g:
-        if list(list(prolog.query(r'w_hunter(X,Y,_), \+w_gold(0,0), w_goal(0).'))):
+        # Try to grab gold or open chest
+        hunter_pos = list(prolog.query("w_hunter(X,Y,_)."))[0]
+        hx, hy = hunter_pos['X'], hunter_pos['Y']
+        
+        # Check for chest at this position
+        chest_result = list(prolog.query(f"chest(_, {hx}, {hy}, _)."))
+        if chest_result:
+            list(prolog.query("open_chest."))
+        elif list(prolog.query('w_hunter(X,Y,_), w_gold(X,Y), w_goal(0).')):
             list(prolog.query("grab(0)."))
+        
+        list(prolog.query("process_environment_turn."))
+        if turn_indicator:
+            turn_indicator.increment_turn()
     if event.key == pygame.K_c:
-        if list(list(prolog.query('w_hunter(1,1,_), w_goal(1)'))):
+        # Try to collect rock
+        list(prolog.query("collect_rock."))
+        
+        # Climb if at exit
+        if list(prolog.query('w_hunter(1,1,_), w_goal(1).')):
             list(prolog.query("climb(1)."))
             winner()
+    if event.key == pygame.K_r:
+        # Start rock throwing mode
+        if rock_aiming:
+            hunter_pos = list(prolog.query("w_hunter(X,Y,_)."))[0]
+            hx, hy = hunter_pos['X'], hunter_pos['Y']
+            rock_aiming.start_aiming((hx, hy))
 
 
 def main(args) -> None:
@@ -297,6 +458,26 @@ def main(args) -> None:
     gold = Gold(*list(prolog.query("w_gold( X, Y)."))[0].values())
     pit_values = list(prolog.query("w_pit( X, Y)."))
     pits = [Pit(*pit_val.values()) for pit_val in pit_values]
+    
+    # NEW: Load chests
+    chests = []
+    chest_values = list(prolog.query("chest(ID, X, Y, _)."))
+    for chest_val in chest_values:
+        chest = TreasureChest(chest_val['ID'], chest_val['X'], chest_val['Y'])
+        chests.append(chest)
+    
+    # NEW: Load rock pickups
+    rocks = []
+    rock_values = list(prolog.query("rock_pickup(X, Y)."))
+    for rock_val in rock_values:
+        rock = RockPickup(rock_val['X'], rock_val['Y'])
+        rocks.append(rock)
+    
+    # NEW: Initialize UI components
+    fog_of_war = FogOfWar(grid_size=4, cell_size=147, prolog_engine=prolog)
+    inventory_ui = InventoryDisplay(FONT, prolog_engine=prolog)
+    rock_aiming_ui = RockAimingOverlay(POSITIONS, cell_size=147, prolog_engine=prolog, font_path=FONT)
+    turn_indicator = TurnIndicator(FONT, prolog_engine=prolog)
 
     clock = pygame.time.Clock()
     while True:
@@ -308,10 +489,34 @@ def main(args) -> None:
                 print(pygame.mouse.get_pos())
             if event.type == pygame.KEYDOWN:
                 if not args.is_agent:
-                    user_controller(event, hunter)
+                    user_controller(event, hunter, rock_aiming_ui, turn_indicator)
 
+        # Update objects
         update_objects(light, moving_sprites, *pits, gold)
+        for chest in chests:
+            chest.update()
+        for rock in rocks:
+            rock.update()
+        
+        # Draw everything
         draw_window(light, moving_sprites, *pits, gold)
+        
+        # Draw chests and rocks
+        for chest in chests:
+            chest.draw()
+        for rock in rocks:
+            if not rock.collected:
+                rock.draw()
+        
+        # NEW: Draw fog of war
+        fog_of_war.draw(WIN, POSITIONS)
+        
+        # NEW: Draw UI
+        inventory_ui.draw(WIN, position=(10, 10))
+        turn_indicator.draw(WIN, position=(10, 650))
+        rock_aiming_ui.draw(WIN, None)  # font parameter not used
+
+        pygame.display.update()
 
         if list(prolog.query("w_hunter(1,1,_), w_goal(1).")):
             winner()
@@ -321,6 +526,7 @@ def main(args) -> None:
             if now - last >= cooldown:
                 last = now
                 list(prolog.query("runloop(-1)."))
+                turn_indicator.increment_turn()
 
 
 if __name__ == '__main__':
