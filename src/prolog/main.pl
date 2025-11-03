@@ -317,10 +317,10 @@ move :-
     h_score(A), B is A-1, retract(h_score(_)), assert(h_score(B)),
     w_hunter(X,Y,FACING),
     (
-        FACING = up, plus(Y,+1,N_Y), N_X is X;
-        FACING = down, plus(Y,-1,N_Y), N_X is X;
-        FACING = left, plus(X,-1,N_X), N_Y is Y;
-        FACING = right, plus(X,+1,N_X), N_Y is Y
+        FACING = up, N_Y is Y+1, N_X is X;
+        FACING = down, N_Y is Y-1, N_X is X;
+        FACING = left, N_X is X-1, N_Y is Y;
+        FACING = right, N_X is X+1, N_Y is Y
     ),
 	retract(w_hunter(_,_,_)),
 	assert(w_hunter(N_X, N_Y, FACING)). 

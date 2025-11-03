@@ -267,7 +267,7 @@ def user_controller(event, hunter):
     if event.key == pygame.K_s:
         list(prolog.query("shoot."))
     if event.key == pygame.K_g:
-        if list(list(prolog.query('w_hunter(X,Y,_), \+w_gold(0,0), w_goal(0).'))):
+        if list(list(prolog.query(r'w_hunter(X,Y,_), \+w_gold(0,0), w_goal(0).'))):
             list(prolog.query("grab(0)."))
     if event.key == pygame.K_c:
         if list(list(prolog.query('w_hunter(1,1,_), w_goal(1)'))):
